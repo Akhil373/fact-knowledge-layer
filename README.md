@@ -57,12 +57,6 @@ API: `GET /health`, `POST /documents/upload`, `POST /pipeline/run?filename=&max_
 
 Link: https://drive.google.com/file/d/1IU0DxtPJZIin4mKvXdSbcObxCxZeX1Kv/view?usp=drive_link
 
-Local demo video (in repo): `./superjoin1.mp4` (12 MB) — same ≤3 min recording, shows upload → pipeline → 4 cases.
-
-```bash
-# Play locally:
-# open superjoin1.mp4  # or vlc superjoin1.mp4
-```
 
 ## Approach
 
