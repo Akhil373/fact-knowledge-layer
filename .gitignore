@@ -15,8 +15,9 @@ build/
 data/
 uploads/
 storage.json
-starter_dataset/
-*.pdf
-*.md
+logs.md
 tmp/
-scripts/
+# keep docs and starter datasets for submission
+!starter-datasets/
+!starter-datasets/**/*.pdf
+!starter-datasets/**/*.md
