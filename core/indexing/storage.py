@@ -22,17 +22,47 @@ class AnchorStore:
         self.docs: Dict[str, dict] = {}  # doc_id -> {profile dict, num_facts}
         self.buckets: Dict[Tuple[str, str], List[dict]] = defaultdict(list)
 
-    def add_document(self, doc_id: str, profile: DocumentProfile, facts: List[NormalizedFact]):
-        """Incremental append. Overwrites same doc_id (re-upload = replace)."""
-        # Remove old facts from this doc if re-uploaded
+    def add_document(self, doc_id: str, profile: DocumentProfile, facts: List[NormalizedFact], processed_pages: list[int] | None = None):
+        """Incremental append. Overwrites same doc_id unless incremental append is used."""
+        # Remove old facts from this doc if re-uploaded (full replace)
         self.remove_document(doc_id)
         self.docs[doc_id] = {
             "profile": profile.model_dump(),
             "num_facts": len(facts),
+            "processed_pages": sorted(set(processed_pages or [])),
         }
         for f in facts:
             key = (_norm_entity(f.raw.subject_entity), f.canonical_metric)
             self.buckets[key].append(f.model_dump())
+        self.save()
+
+    def append_facts(self, doc_id: str, profile: DocumentProfile, new_facts: List[NormalizedFact], new_pages: list[int]):
+        """Incrementally append new pages' facts to existing doc without reprocessing old pages."""
+        if doc_id not in self.docs:
+            return self.add_document(doc_id, profile, new_facts, processed_pages=new_pages)
+        # dedup by (metric, value, excerpt_page, quote) to avoid duplicates on retry
+        existing_keys = {
+            (d.get("canonical_metric"), d["raw"]["raw_value"], d["raw"]["excerpt_page"], d["raw"]["exact_quote"][:60])
+            for lst in self.buckets.values()
+            for d in lst
+            if d.get("source_doc_id") == doc_id
+        }
+        to_add = []
+        for f in new_facts:
+            k = (f.canonical_metric, f.raw.raw_value, f.raw.excerpt_page, f.raw.exact_quote[:60])
+            if k not in existing_keys:
+                to_add.append(f)
+        for f in to_add:
+            key = (_norm_entity(f.raw.subject_entity), f.canonical_metric)
+            self.buckets[key].append(f.model_dump())
+        # update doc stats
+        prev_pages = set(self.docs[doc_id].get("processed_pages", []))
+        prev_pages.update(new_pages)
+        self.docs[doc_id]["profile"] = profile.model_dump()
+        self.docs[doc_id]["num_facts"] = sum(
+            1 for lst in self.buckets.values() for d in lst if d.get("source_doc_id") == doc_id
+        )
+        self.docs[doc_id]["processed_pages"] = sorted(prev_pages)
         self.save()
 
     def remove_document(self, doc_id: str):

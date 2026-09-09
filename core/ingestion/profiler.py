@@ -59,20 +59,42 @@ def profile_document(
     """
     # Heuristic fallback if no API key
     try:
-        from core.config import is_llm_configured
+        from core.config import is_llm_configured, chat_extra_body
 
         if not is_llm_configured():
             raise ValueError("LLM not configured, using heuristic")
         client = get_llm_client()
         messages = build_profiler_messages(page_payloads)
-        resp = client.chat.completions.create(
+        extra = chat_extra_body()
+        # Try with response_format first, fallback without for Bynara
+        kwargs = dict(
             model=GROQ_MODEL,
             messages=messages,
             temperature=0,
+            timeout=20,
             response_format={"type": "json_object"},
         )
+        if extra:
+            kwargs["extra_body"] = extra
+        try:
+            resp = client.chat.completions.create(**kwargs)
+        except Exception as e:
+            if "invalid" in str(e).lower() or "response_format" in str(e).lower():
+                kwargs.pop("response_format", None)
+                # also drop max_tokens if present (Bynara muse-spark fails with capped max_tokens)
+                kwargs.pop("max_tokens", None)
+                resp = client.chat.completions.create(**kwargs)
+            else:
+                raise
         content = resp.choices[0].message.content
-        data = json.loads(content)
+        # handle fenced json when response_format not used
+        import re
+
+        try:
+            data = json.loads(content)
+        except Exception:
+            m = re.search(r"\{.*\}", content, re.DOTALL)
+            data = json.loads(m.group(0)) if m else {}
         return DocumentProfile(**data)
     except Exception as e:
         # Heuristic fallback: inspect text for keywords (scan first 5 pages since some excerpts start with CONTENTS)

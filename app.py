@@ -1,10 +1,10 @@
 """FastAPI entry point: upload PDFs, inspect facts + reconciliations."""
+
 import os
 import shutil
 from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
-from fastapi.responses import JSONResponse
 
 from core.indexing.registry import CanonicalMetricRegistry
 from core.indexing.storage import AnchorStore
@@ -40,12 +40,12 @@ async def upload(file: UploadFile = File(...)):
 
 
 @app.post("/pipeline/run")
-def run_pipeline(filename: str, max_pages: int = 100):
+def run_pipeline(filename: str, max_pages: int = 100, incremental: bool = False):
     path = os.path.join(UPLOAD_DIR, filename)
     if not os.path.exists(path):
         raise HTTPException(404, f"Upload {filename} first via /documents/upload")
     try:
-        return pipe.process_pdf(path, max_pages=max_pages)
+        return pipe.process_pdf(path, max_pages=max_pages, incremental=incremental)
     except ValueError as e:
         # e.g. GROQ_API_KEY missing
         raise HTTPException(400, str(e))
@@ -54,6 +54,34 @@ def run_pipeline(filename: str, max_pages: int = 100):
 @app.get("/documents")
 def list_documents():
     return store.stats()
+
+
+@app.delete("/documents/{doc_id}")
+def delete_document(doc_id: str):
+    if doc_id not in store.docs:
+        raise HTTPException(404, f"doc_id {doc_id} not found")
+    store.remove_document(doc_id)
+    store.save()
+    return {"deleted": doc_id, **store.stats()}
+
+
+@app.post("/documents/reset")
+def reset_all():
+    store.docs.clear()
+    store.buckets.clear()
+    store.save()
+    if os.path.exists("storage.json"):
+        os.remove("storage.json")
+    if os.path.exists(UPLOAD_DIR):
+        for f in os.listdir(UPLOAD_DIR):
+            try:
+                os.remove(os.path.join(UPLOAD_DIR, f))
+            except Exception:
+                pass
+    # reset registry as well
+    registry._keys.clear()
+    registry._variants.clear()
+    return {"status": "reset", **store.stats()}
 
 
 @app.get("/facts")
@@ -66,12 +94,73 @@ def list_facts(doc_id: Optional[str] = None, metric: Optional[str] = None):
     return [f.model_dump() for f in facts]
 
 
+@app.get("/buckets")
+def list_buckets():
+    return {
+        "buckets": [
+            {
+                "key": f"{k[0]}|||{k[1]}",
+                "count": len(v),
+                "docs": list({d.get("source_doc_id") for d in v}),
+            }
+            for k, v in store.buckets.items()
+        ],
+        "multi_doc_buckets": len(store.buckets_with_multi_docs()),
+    }
+
+
 @app.get("/reconciliation")
-def list_reconciliation(status: Optional[str] = Query(default=None, pattern="^(CORROBORATED|GENUINE_CONTRADICTION|RECONCILED_BY_CONTEXT)$")):
+def list_reconciliation(
+    status: Optional[str] = Query(
+        default=None,
+        pattern="^(CORROBORATED|GENUINE_CONTRADICTION|RECONCILED_BY_CONTEXT)$",
+    ),
+):
     results = reconcile_all(store.buckets_with_multi_docs())
     if status:
         results = [r for r in results if r.status == status]
     return [r.model_dump() for r in results]
+
+
+@app.post("/admin/rebuild-registry")
+def rebuild_registry():
+    """Step 5 only: re-resolve all stored facts' canonical_metric via current HF embedding (no LLM re-extraction, no cost).
+    Keeps storage.json facts, rebuilds buckets with new registry. Use after HF model fix."""
+    from core.schemas import RawFact
+
+    old_facts = store.all_facts()
+    if not old_facts:
+        return {"status": "no facts", **store.stats()}
+    # fresh registry with new HF sentence_similarity
+    new_registry = CanonicalMetricRegistry()
+    # reset buckets, keep docs
+    old_docs = dict(store.docs)
+    store.buckets.clear()
+    # re-resolve each fact
+    for nf in old_facts:
+        rf = nf.raw
+        new_key = new_registry.resolve(rf.raw_metric)
+        # rebuild NormalizedFact with new canonical
+        from core.normalization.normalizer import normalize_fact
+
+        # need profile tier for rebuild — use stored tier
+        new_nf = normalize_fact(rf, new_key, nf.authority_tier, nf.source_doc_id)
+        # preserve original normalized fields that normalize_fact recomputes deterministically
+        key = (rf.subject_entity.strip().lower() if rf.subject_entity else "unknown", new_key)
+        if key not in store.buckets:
+            store.buckets[key] = []
+        store.buckets[key].append(new_nf.model_dump())
+    # swap registry
+    registry._keys = new_registry._keys
+    registry._variants = new_registry._variants
+    store.save()
+    return {
+        "status": "rebuilt",
+        "facts_rebuilt": len(old_facts),
+        "registry_keys": registry.keys(),
+        **store.stats(),
+        "multi_doc_buckets": len(store.buckets_with_multi_docs()),
+    }
 
 
 @app.get("/case4-showcase")
@@ -88,11 +177,21 @@ def case4_showcase(filename: str):
     prev = None
     for p in payloads:
         try:
-            cur = int(p.printed_page) if p.printed_page and p.printed_page.isdigit() else None
+            cur = (
+                int(p.printed_page)
+                if p.printed_page and p.printed_page.isdigit()
+                else None
+            )
         except Exception:
             cur = None
         if prev is not None and cur is not None and cur - prev > 1:
-            jumps.append({"excerpt_page": p.excerpt_page, "printed_page": p.printed_page, "gap_from": prev})
+            jumps.append(
+                {
+                    "excerpt_page": p.excerpt_page,
+                    "printed_page": p.printed_page,
+                    "gap_from": prev,
+                }
+            )
         if cur is not None:
             prev = cur
     # Footnote check: tables containing '*'

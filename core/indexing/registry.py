@@ -1,10 +1,11 @@
 """Step 5 — Dynamic CanonicalMetricRegistry (no hardcoded enum).
 
-Pipeline spec: new raw_metric -> cosine >=0.85 OR fast LLM arbiter
+Pipeline spec: new raw_metric -> cosine >=0.90 OR fast LLM arbiter
 "Does '{raw_metric}' represent the exact same metric as any of {existing}?"
-Implementation: HF API embedding (google/embeddinggemma-300m) >=0.85 -> merge,
+Implementation: HF API embedding (google/embeddinggemma-300m) >=0.90 -> merge,
 else jaccard/LLM fallback, else register new key.
 """
+
 import json
 import re
 from typing import Dict, List, Optional
@@ -13,7 +14,9 @@ from typing import Dict, List, Optional
 def _tokens(s: str) -> set:
     toks = re.findall(r"[a-z0-9]+", s.lower())
     stop = {"from", "of", "the", "and", "for", "in", "on", "total", "net"}
-    return {t for t in toks if t not in stop} or set(re.findall(r"[a-z0-9]+", s.lower()))
+    return {t for t in toks if t not in stop} or set(
+        re.findall(r"[a-z0-9]+", s.lower())
+    )
 
 
 def _jaccard(a: str, b: str) -> float:
@@ -32,7 +35,7 @@ def _to_key(raw_metric: str) -> str:
 class CanonicalMetricRegistry:
     """Evolving map: canonical_key -> [raw_metric variants]."""
 
-    def __init__(self, threshold: float = 0.85):
+    def __init__(self, threshold: float = 0.90):
         self.threshold = threshold
         self._keys: List[str] = []  # insertion order
         self._variants: Dict[str, List[str]] = {}
@@ -97,26 +100,27 @@ class CanonicalMetricRegistry:
         return key
 
     def _embedding_match(self, raw: str) -> Optional[str]:
-        """Try embedding cosine >= threshold. Returns canonical key or None."""
+        """Try HF sentence_similarity >= threshold via InferenceClient."""
         try:
-            from core.indexing.embeddings import encode_query, encode_document, cosine_similarity
+            from core.indexing.embeddings import sentence_similarity, is_available
 
-            # Build list of all variants for batch embedding
-            q_emb = encode_query(raw)
-            # Collect candidate keys with their variants
-            best_key, best_score = None, 0.0
+            if not is_available():
+                return None
+            # Collect all variants flat with key mapping
+            all_variants: List[str] = []
+            variant_to_key: List[str] = []
             for k, variants in self._variants.items():
-                # batch encode variants of this key; take max similarity within key
-                try:
-                    d_embs = encode_document(variants)
-                    # d_embs may be 2-D; iterate
-                    for i in range(len(variants)):
-                        emb = d_embs[i]
-                        score = cosine_similarity(q_emb, emb)
-                        if score > best_score:
-                            best_key, best_score = k, score
-                except Exception:
-                    continue
+                for v in variants:
+                    all_variants.append(v)
+                    variant_to_key.append(k)
+            if not all_variants:
+                return None
+            # Single InferenceClient call: source=raw vs all existing variants
+            scores = sentence_similarity(raw, all_variants)
+            best_key, best_score = None, 0.0
+            for key, score in zip(variant_to_key, scores):
+                if score > best_score:
+                    best_key, best_score = key, score
             if best_key and best_score >= self.threshold:
                 return best_key
             return None
@@ -125,17 +129,24 @@ class CanonicalMetricRegistry:
 
     def _llm_arbiter(self, raw: str) -> Optional[str]:
         try:
-            from core.config import is_llm_configured, get_llm_client, GROQ_ARBITER_MODEL
+            from core.config import (
+                is_llm_configured,
+                get_llm_client,
+                GROQ_ARBITER_MODEL,
+                chat_extra_body,
+            )
+            import re
 
             if not is_llm_configured():
                 return None
             client = get_llm_client()
-            resp = client.chat.completions.create(
+            extra = chat_extra_body()
+            kwargs = dict(
                 model=GROQ_ARBITER_MODEL,
                 messages=[
                     {
                         "role": "system",
-                        "content": "You map financial metric names. Reply ONLY JSON: {\"match\": <canonical key or null>}",
+                        "content": 'You map financial metric names. Reply ONLY JSON: {"match": <canonical key or null>}',
                     },
                     {
                         "role": "user",
@@ -143,9 +154,31 @@ class CanonicalMetricRegistry:
                     },
                 ],
                 temperature=0,
-                response_format={"type": "json_object"},
+                timeout=15,
             )
-            data = json.loads(resp.choices[0].message.content)
+            # Try with response_format first, fallback without for Bynara
+            try:
+                kwargs["response_format"] = {"type": "json_object"}
+                if extra:
+                    kwargs["extra_body"] = extra
+                resp = client.chat.completions.create(**kwargs)
+            except Exception as e:
+                if "invalid" in str(e).lower() or "response_format" in str(e).lower():
+                    kwargs.pop("response_format", None)
+                    resp = client.chat.completions.create(**kwargs)
+                else:
+                    raise
+            content = resp.choices[0].message.content
+            try:
+                data = json.loads(content)
+            except Exception:
+                import re
+
+                m2 = re.search(r"\{.*\}", content, re.DOTALL)
+                try:
+                    data = json.loads(m2.group(0)) if m2 else {}
+                except Exception:
+                    data = {}
             m = data.get("match")
             return m if m in self._variants else None
         except Exception:

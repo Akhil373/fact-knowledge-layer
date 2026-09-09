@@ -18,4 +18,5 @@ storage.json
 starter_dataset/
 *.pdf
 *.md
-
+tmp/
+scripts/

@@ -7,3 +7,4 @@ python-dotenv>=1.0
 pandas>=2.0
 python-multipart>=0.0.6
 requests>=2.31
+huggingface_hub>=0.25
