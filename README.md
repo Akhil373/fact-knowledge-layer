@@ -11,6 +11,7 @@ pip install -r requirements.txt
 # 2. Env — Bynara OpenAI-compatible router (fill from .env.example)
 cp .env.example .env
 # then in .env:
+any openai compatible key
 # LLM_API_KEY=your_bynara_key
 # LLM_BASE_URL=https://router.bynara.id/v1
 # LLM_MODEL=muse-spark-1.2-contributor-free
@@ -54,17 +55,14 @@ API: `GET /health`, `POST /documents/upload`, `POST /pipeline/run?filename=&max_
 
 ## Video Demo
 
-**Link:** _(add your ≤3 min recording link here — Loom/Drive unlisted)_
+Link: https://drive.google.com/file/d/1IU0DxtPJZIin4mKvXdSbcObxCxZeX1Kv/view?usp=drive_link
 
-**What to show (script in time order):**
+Local demo video (in repo): `./superjoin1.mp4` (12 MB) — same ≤3 min recording, shows upload → pipeline → 4 cases.
 
-1. **Setup (0:00-0:20)** `cat .env.example` + `pip install` + `uvicorn app:app --port 8000` → `curl /health`
-2. **Upload + fact ledger (0:20-1:00)** `POST /documents/upload` `01-...pdf` → `POST /pipeline/run?max_pages=15` → `GET /facts` verbatim `exact_quote` + `printed_page` (dual provenance `core/ingestion/parser.py:9`)
-3. **Second doc (1:00-1:40)** upload `03-...pdf` → `GET /health` `2 docs` → `GET /buckets` `multi_doc_buckets`
-4. **Four cases (1:40-2:30)** `GET /reconciliation?status=CORROBORATED` (`FY24 81420000000` same value, `1.5%` at `core/reconciliation/engine.py:1`), `GENUINE_CONTRADICTION` (`FY24 81420000000 vs 10000000000` `TIER_DISCREPANCY` Tier-3 vs Tier-1), `RECONCILED_BY_CONTEXT` (`Q4_FY24 vs FY24` `PERIOD_MISMATCH, SCOPE_MISMATCH`), `GET /case4-showcase` (`page_jumps 17→22, 33→90` + `footnote_table_pages` `*` at `core/ingestion/parser.py:52`)
-5. **Wrap (2:30-3:00)** `tmp/` (`tmp/health.json` `tmp/facts.json` `115` facts) + mention HF `0.90` at `core/indexing/registry.py:42`
-
-Current snapshot for recording: `tmp/health.json` `2 docs, 115 facts, 62 buckets, 6 reconciliations (1 CORROBORATED, 1 GENUINE, 4 RECONCILED)` after `POST /admin/rebuild-registry` with `google/embeddinggemma-300m`.
+```bash
+# Play locally:
+# open superjoin1.mp4  # or vlc superjoin1.mp4
+```
 
 ## Approach
 
@@ -104,11 +102,3 @@ Current snapshot for recording: `tmp/health.json` `2 docs, 115 facts, 62 buckets
 - **Sampling** `extractor.py:135` table-aware now prioritizes `len(tables)`, but still misses footnote anchoring for `*` on `page 10` (`case4-showcase` shows `footnote_table_pages: []` for deck); needs `*`→row linker.
 - **Performance:** `30` pages `357s` (prospectus) due to sequential Bynara calls; needs async `POST /pipeline/run` → `job_id` + `GET /pipeline/status` (queued) and `HF` batch `sentence_similarity` already `1` call per `resolve`.
 - **Next:** SQLite for many-PDF scale, `HF_THRESHOLD` env, `GET /registry/inputs` debug dump, eval harness measuring precision/recall vs hand-labeled `pipeline.md:163` 4 cases.
-
-## Additional Notes
-
-- **Generalizes** to `india-macroeconomy` (`01-... Economic Survey` `Government of India` etc. at `profiler.py:62` heuristic) without code changes — tested via `starter-datasets/india-macroeconomy/*.pdf`.
-- **Credentials:** only `LLM_API_KEY`/`HF_TOKEN` in `.env` (gitignored, see `.env.example:1`); repo contains `tmp/*.json` sample outputs + `tests/test_reconciliation.py` runnable offline.
-- **Structure:** `core/{schemas,config,pipeline}.py`, `core/{ingestion,extraction,normalization,indexing,reconciliation}/`, `app.py`, `scripts/{run_delhivery.py,test_llm_configurable}`, `test_llm.py`, `tests/test_reconciliation.py`.
-- **Incremental:** `storage.json:1` `processed_pages` survives restart (`tmp/health.json:1` `2 docs, 115 facts, 62 buckets` after `tmp/storage.json` restore); `POST /admin/rebuild-registry` at `app.py:1` re-canonicalizes without re-billing extraction.
-- **Video current snapshot:** `2 docs, 115 facts, 6 reconciliations (1 CORROBORATED, 1 GENUINE, 4 RECONCILED)` after synthetic `REVENUE_FOR_SERVICES_A` injection for demo (see `tmp/reconciliation.json:1`).
